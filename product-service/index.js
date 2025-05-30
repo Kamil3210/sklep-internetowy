@@ -1,82 +1,164 @@
 const express = require('express');
+const db = require('./db'); // Importujemy nasz moduł db.js
 const app = express();
-const port = process.env.PORT || 3001; // Port dla usługi produktów
+const port = process.env.PORT || 3001;
 
-app.use(express.json()); // Middleware do parsowania JSON
+app.use(express.json());
 
-// Przykładowa tablica produktów (na razie w pamięci)
-let products = [
-    { id: 1, name: 'Laptop Pro', price: 4500, category: 'Electronics' },
-    { id: 2, name: 'Klawiatura Mechaniczna', price: 350, category: 'Accessories' },
-    { id: 3, name: 'Mysz Gamingowa', price: 200, category: 'Accessories' }
-];
-let nextProductId = 4;
+// Inicjalizacja bazy danych (stworzenie tabeli jeśli nie istnieje) przy starcie aplikacji
+db.initializeDatabase().catch(err => {
+    console.error("Failed to initialize database on startup:", err);
+    process.exit(1); // Zakończ aplikację jeśli inicjalizacja bazy danych się nie powiedzie
+});
 
-// --- Proste Endpointy CRUD dla Produktów ---
+
+// --- Endpointy CRUD dla Produktów z użyciem PostgreSQL ---
 
 // GET /products - pobierz listę wszystkich produktów
-app.get('/products', (req, res) => {
-    res.json(products);
+app.get('/products', async (req, res) => {
+    try {
+        const { rows } = await db.query('SELECT * FROM products ORDER BY id ASC');
+        res.json(rows);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
+    }
 });
 
 // GET /products/:id - pobierz produkt o danym ID
-app.get('/products/:id', (req, res) => {
-    const productId = parseInt(req.params.id);
-    const product = products.find(p => p.id === productId);
-    if (product) {
-        res.json(product);
-    } else {
-        res.status(404).send('Product not found');
+app.get('/products/:id', async (req, res) => {
+    try {
+        const productId = parseInt(req.params.id);
+        if (isNaN(productId)) {
+            return res.status(400).send('Invalid product ID');
+        }
+        const { rows } = await db.query('SELECT * FROM products WHERE id = $1', [productId]);
+        if (rows.length > 0) {
+            res.json(rows[0]);
+        } else {
+            res.status(404).send('Product not found');
+        }
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
     }
 });
 
 // POST /products - dodaj nowy produkt
-app.post('/products', (req, res) => {
+app.post('/products', async (req, res) => {
     const { name, price, category } = req.body;
-    if (!name || price == null || !category) {
+    if (!name || price == null || category == null) { // Pozwalamy na pustą kategorię, ale musi być podana
         return res.status(400).send('Missing name, price, or category');
     }
-    const newProduct = {
-        id: nextProductId++,
-        name,
-        price,
-        category
-    };
-    products.push(newProduct);
-    res.status(201).json(newProduct);
+    if (isNaN(parseFloat(price)) || parseFloat(price) < 0) {
+        return res.status(400).send('Invalid price value');
+    }
+
+    try {
+        const { rows } = await db.query(
+            'INSERT INTO products (name, price, category) VALUES ($1, $2, $3) RETURNING *',
+            [name, parseFloat(price), category]
+        );
+        res.status(201).json(rows[0]);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
+    }
 });
 
-// PUT /products/:id - aktualizuj produkt (prosta implementacja - zastępuje cały obiekt)
-app.put('/products/:id', (req, res) => {
+// PUT /products/:id - aktualizuj produkt
+app.put('/products/:id', async (req, res) => {
     const productId = parseInt(req.params.id);
-    const productIndex = products.findIndex(p => p.id === productId);
+    if (isNaN(productId)) {
+        return res.status(400).send('Invalid product ID');
+    }
+    const { name, price, category } = req.body;
 
-    if (productIndex !== -1) {
-        const { name, price, category } = req.body;
-        if (!name || price == null || !category) {
-            return res.status(400).send('Missing name, price, or category for update');
+    // Prosta walidacja - można ją rozbudować
+    if (name === undefined && price === undefined && category === undefined) {
+        return res.status(400).send('No fields provided for update.');
+    }
+    if (price !== undefined && (isNaN(parseFloat(price)) || parseFloat(price) < 0)) {
+        return res.status(400).send('Invalid price value');
+    }
+
+    try {
+        // Dynamiczne budowanie zapytania, aby aktualizować tylko podane pola
+        const fields = [];
+        const values = [];
+        let paramCount = 1;
+
+        if (name !== undefined) {
+            fields.push(`name = $${paramCount++}`);
+            values.push(name);
         }
-        products[productIndex] = { ...products[productIndex], name, price, category };
-        res.json(products[productIndex]);
-    } else {
-        res.status(404).send('Product not found');
+        if (price !== undefined) {
+            fields.push(`price = $${paramCount++}`);
+            values.push(parseFloat(price));
+        }
+        if (category !== undefined) {
+            fields.push(`category = $${paramCount++}`);
+            values.push(category);
+        }
+        
+        // Dodajemy updated_at, które będzie automatycznie zaktualizowane przez trigger, ale możemy też dodać ręcznie
+        // fields.push(`updated_at = CURRENT_TIMESTAMP`);
+
+        if (fields.length === 0) {
+             return res.status(400).send("No updatable fields provided.");
+        }
+
+        values.push(productId); // Ostatni parametr to ID produktu
+        const queryText = `UPDATE products SET ${fields.join(', ')} WHERE id = $${paramCount} RETURNING *`;
+        
+        const { rows } = await db.query(queryText, values);
+
+        if (rows.length > 0) {
+            res.json(rows[0]);
+        } else {
+            res.status(404).send('Product not found or no changes made');
+        }
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
     }
 });
 
 // DELETE /products/:id - usuń produkt
-app.delete('/products/:id', (req, res) => {
+app.delete('/products/:id', async (req, res) => {
     const productId = parseInt(req.params.id);
-    const productIndex = products.findIndex(p => p.id === productId);
-
-    if (productIndex !== -1) {
-        const deletedProduct = products.splice(productIndex, 1);
-        res.json(deletedProduct[0]);
-    } else {
-        res.status(404).send('Product not found');
+     if (isNaN(productId)) {
+        return res.status(400).send('Invalid product ID');
+    }
+    try {
+        const { rows } = await db.query('DELETE FROM products WHERE id = $1 RETURNING *', [productId]);
+        if (rows.length > 0) {
+            res.json({ message: 'Product deleted successfully', product: rows[0] });
+        } else {
+            res.status(404).send('Product not found');
+        }
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
     }
 });
-
 
 app.listen(port, () => {
     console.log(`Product service listening on port ${port}`);
 });
+
+// Obsługa poprawnego zamykania puli połączeń przy zamykaniu aplikacji
+const gracefulShutdown = async () => {
+    console.log('Shutting down gracefully...');
+    try {
+        await db.pool.end(); // Zamyka wszystkie połączenia w puli
+        console.log('PostgreSQL pool has been closed.');
+        process.exit(0);
+    } catch (error) {
+        console.error('Error during pool shutdown', error.stack);
+        process.exit(1);
+    }
+};
+
+process.on('SIGTERM', gracefulShutdown); // sygnał z `kill`
+process.on('SIGINT', gracefulShutdown);  // sygnał z Ctrl+C

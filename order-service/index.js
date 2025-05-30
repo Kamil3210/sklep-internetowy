@@ -1,100 +1,195 @@
 const express = require('express');
+const db = require('./db'); // Importujemy nasz moduł db.js
 const app = express();
-const port = process.env.PORT || 3002; // Inny port niż product-service
+const port = process.env.PORT || 3002;
 
-app.use(express.json()); // Middleware do parsowania JSON
+app.use(express.json());
 
-// Przykładowa tablica zamówień (na razie w pamięci)
-// Struktura zamówienia: { id: 1, userId: 101, products: [{ productId: 1, quantity: 2, priceAtPurchase: 4500 }, { productId: 2, quantity: 1, priceAtPurchase: 350 }], totalAmount: 9350, status: 'Pending' }
-let orders = [];
-let nextOrderId = 1;
+// Inicjalizacja bazy danych przy starcie aplikacji
+db.initializeDatabase().catch(err => {
+    console.error("Failed to initialize database (order_service_db) on startup:", err);
+    process.exit(1);
+});
 
-// --- Proste Endpointy dla Zamówień ---
+// --- Endpointy dla Zamówień z użyciem PostgreSQL ---
 
 // POST /orders - stwórz nowe zamówienie
-app.post('/orders', (req, res) => {
-    const { userId, productItems } = req.body; // productItems to tablica np. [{ productId: 1, quantity: 1 }, ...]
+app.post('/orders', async (req, res) => {
+    const { userId, productItems } = req.body; // productItems: [{ productId: "prod123", quantity: 1, priceAtPurchase: 99.99 }, ...]
 
     if (!userId || !productItems || !Array.isArray(productItems) || productItems.length === 0) {
-        return res.status(400).send('Missing userId or productItems, or productItems is not a valid array.');
+        return res.status(400).send('Missing userId or productItems.');
     }
 
-    // W przyszłości:
-    // 1. Weryfikacja istnienia userId (jeśli masz user-service).
-    // 2. Pobranie aktualnych cen produktów z product-service i walidacja dostępności.
-    // 3. Obliczenie totalAmount na podstawie aktualnych cen.
-    // Tutaj, dla uproszczenia, zakładamy, że ceny są przekazywane lub pomijamy ten krok.
-    let calculatedTotalAmount = 0;
-    const processedProductItems = productItems.map(item => {
-        // Symulacja pobrania ceny - w realnym scenariuszu tu byłby call do product-service
-        const mockPrice = item.productId === 1 ? 4500 : (item.productId === 2 ? 350 : 100); // Przykładowe ceny
-        calculatedTotalAmount += mockPrice * item.quantity;
-        return {
-            productId: item.productId,
-            quantity: item.quantity,
-            priceAtPurchase: mockPrice // Zapisujemy cenę w momencie zakupu
+    // Walidacja productItems
+    for (const item of productItems) {
+        if (!item.productId || item.quantity == null || item.priceAtPurchase == null || 
+            isNaN(parseInt(item.quantity)) || parseInt(item.quantity) <= 0 ||
+            isNaN(parseFloat(item.priceAtPurchase)) || parseFloat(item.priceAtPurchase) < 0) {
+            return res.status(400).send('Invalid productItems structure or values. Each item must have productId, quantity, and priceAtPurchase.');
+        }
+    }
+
+    // Obliczenie całkowitej kwoty zamówienia
+    const totalAmount = productItems.reduce((sum, item) => sum + (parseFloat(item.priceAtPurchase) * parseInt(item.quantity)), 0);
+
+    const client = await db.pool.connect(); // Pobieramy klienta z puli dla transakcji
+    try {
+        await client.query('BEGIN'); // Rozpoczęcie transakcji
+
+        // 1. Wstawienie do tabeli 'orders'
+        const orderQuery = `
+            INSERT INTO orders (user_id, total_amount, status) 
+            VALUES ($1, $2, $3) RETURNING id, created_at, status, total_amount, user_id;
+        `;
+        const orderResult = await client.query(orderQuery, [userId, totalAmount.toFixed(2), 'Pending']);
+        const newOrder = orderResult.rows[0];
+
+        // 2. Wstawienie do tabeli 'order_items' dla każdej pozycji
+        for (const item of productItems) {
+            const orderItemQuery = `
+                INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase)
+                VALUES ($1, $2, $3, $4);
+            `;
+            await client.query(orderItemQuery, [newOrder.id, item.productId, parseInt(item.quantity), parseFloat(item.priceAtPurchase).toFixed(2)]);
+        }
+
+        await client.query('COMMIT'); // Zatwierdzenie transakcji
+
+        // Pobranie pełnych danych zamówienia do odpowiedzi (opcjonalne, ale dobre dla klienta)
+        const fullOrder = {
+            ...newOrder,
+            products: productItems.map(pi => ({ // Używamy productItems z requestu, bo mamy tam wszystkie dane
+                productId: pi.productId,
+                quantity: parseInt(pi.quantity),
+                priceAtPurchase: parseFloat(pi.priceAtPurchase).toFixed(2)
+            }))
         };
-    });
+        res.status(201).json(fullOrder);
 
-    const newOrder = {
-        id: nextOrderId++,
-        userId,
-        products: processedProductItems,
-        totalAmount: calculatedTotalAmount,
-        status: 'Pending', // Domyślny status
-        createdAt: new Date().toISOString()
-    };
-
-    orders.push(newOrder);
-    console.log('New order created:', newOrder);
-    res.status(201).json(newOrder);
-});
-
-// GET /orders/user/:userId - pobierz zamówienia danego użytkownika
-app.get('/orders/user/:userId', (req, res) => {
-    const userId = parseInt(req.params.userId);
-    const userOrders = orders.filter(order => order.userId === userId);
-
-    if (userOrders.length > 0) {
-        res.json(userOrders);
-    } else {
-        res.status(404).send('No orders found for this user or user does not exist.');
+    } catch (err) {
+        await client.query('ROLLBACK'); // Wycofanie transakcji w przypadku błędu
+        console.error('Error creating order:', err.message, err.stack);
+        res.status(500).send('Server error while creating order.');
+    } finally {
+        client.release(); // Zwolnienie klienta z powrotem do puli
     }
 });
 
-// GET /orders/:orderId - pobierz szczegóły zamówienia
-app.get('/orders/:orderId', (req, res) => {
-    const orderId = parseInt(req.params.orderId);
-    const order = orders.find(o => o.id === orderId);
+// GET /orders/user/:userId - pobierz zamówienia danego użytkownika (z pozycjami)
+app.get('/orders/user/:userId', async (req, res) => {
+    const { userId } = req.params;
+    try {
+        // Pobieranie zamówień
+        const ordersQuery = `
+            SELECT id, user_id, total_amount, status, created_at, updated_at 
+            FROM orders WHERE user_id = $1 ORDER BY created_at DESC;
+        `;
+        const ordersResult = await db.query(ordersQuery, [userId]);
 
-    if (order) {
-        res.json(order);
-    } else {
-        res.status(404).send('Order not found.');
+        if (ordersResult.rows.length === 0) {
+            return res.status(404).json({ message: 'No orders found for this user.' });
+        }
+
+        const ordersWithItems = [];
+        for (const order of ordersResult.rows) {
+            const itemsQuery = `
+                SELECT product_id, quantity, price_at_purchase 
+                FROM order_items WHERE order_id = $1;
+            `;
+            const itemsResult = await db.query(itemsQuery, [order.id]);
+            ordersWithItems.push({ ...order, products: itemsResult.rows });
+        }
+        res.json(ordersWithItems);
+    } catch (err) {
+        console.error('Error fetching user orders:', err.message);
+        res.status(500).send('Server error');
     }
 });
 
-// (Opcjonalnie) PUT /orders/:orderId/status - aktualizacja statusu zamówienia (np. przez admina)
-app.put('/orders/:orderId/status', (req, res) => {
+// GET /orders/:orderId - pobierz szczegóły zamówienia (z pozycjami)
+app.get('/orders/:orderId', async (req, res) => {
     const orderId = parseInt(req.params.orderId);
+    if (isNaN(orderId)) {
+        return res.status(400).send('Invalid order ID.');
+    }
+    try {
+        const orderQuery = `
+            SELECT id, user_id, total_amount, status, created_at, updated_at 
+            FROM orders WHERE id = $1;
+        `;
+        const orderResult = await db.query(orderQuery, [orderId]);
+
+        if (orderResult.rows.length === 0) {
+            return res.status(404).json({ message: 'Order not found.' });
+        }
+        const order = orderResult.rows[0];
+
+        const itemsQuery = `
+            SELECT product_id, quantity, price_at_purchase 
+            FROM order_items WHERE order_id = $1;
+        `;
+        const itemsResult = await db.query(itemsQuery, [order.id]);
+        
+        res.json({ ...order, products: itemsResult.rows });
+    } catch (err) {
+        console.error('Error fetching order details:', err.message);
+        res.status(500).send('Server error');
+    }
+});
+
+// PUT /orders/:orderId/status - aktualizacja statusu zamówienia
+app.put('/orders/:orderId/status', async (req, res) => {
+    const orderId = parseInt(req.params.orderId);
+    if (isNaN(orderId)) {
+        return res.status(400).send('Invalid order ID.');
+    }
     const { status } = req.body;
-
     if (!status) {
         return res.status(400).send('Missing status.');
     }
+    // Można dodać walidację dozwolonych statusów
+    // const allowedStatuses = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
+    // if (!allowedStatuses.includes(status)) {
+    // return res.status(400).send('Invalid status value.');
+    // }
 
-    const orderIndex = orders.findIndex(o => o.id === orderId);
+    try {
+        const updateQuery = `
+            UPDATE orders SET status = $1 WHERE id = $2 RETURNING *;
+        `;
+        const { rows } = await db.query(updateQuery, [status, orderId]);
 
-    if (orderIndex !== -1) {
-        orders[orderIndex].status = status;
-        console.log(`Order ${orderId} status updated to ${status}`);
-        res.json(orders[orderIndex]);
-    } else {
-        res.status(404).send('Order not found.');
+        if (rows.length > 0) {
+            // Jeśli chcemy zwrócić zamówienie z pozycjami:
+            const updatedOrder = rows[0];
+            const itemsQuery = `SELECT product_id, quantity, price_at_purchase FROM order_items WHERE order_id = $1;`;
+            const itemsResult = await db.query(itemsQuery, [updatedOrder.id]);
+            res.json({ ...updatedOrder, products: itemsResult.rows });
+        } else {
+            res.status(404).send('Order not found.');
+        }
+    } catch (err) {
+        console.error('Error updating order status:', err.message);
+        res.status(500).send('Server error');
     }
 });
 
-
 app.listen(port, () => {
-    console.log(`Order service listening on port ${port}`);
+    console.log(`Order service (DB connected) listening on port ${port}`);
 });
+
+// Obsługa poprawnego zamykania puli połączeń
+const gracefulShutdown = async () => {
+    console.log('Shutting down order_service gracefully...');
+    try {
+        await db.pool.end();
+        console.log('PostgreSQL pool (order_service_db) has been closed.');
+        process.exit(0);
+    } catch (error) {
+        console.error('Error during pool shutdown (order_service_db)', error.stack);
+        process.exit(1);
+    }
+};
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
