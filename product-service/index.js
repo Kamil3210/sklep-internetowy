@@ -1,8 +1,11 @@
 const express = require('express');
 const db = require('./db'); // Importujemy nasz moduł db.js
+const cors = require('cors'); // <<< 1. Importuj cors
 const app = express();
 const port = process.env.PORT || 3001;
 
+
+app.use(cors());
 app.use(express.json());
 
 // Inicjalizacja bazy danych (stworzenie tabeli jeśli nie istnieje) przy starcie aplikacji
