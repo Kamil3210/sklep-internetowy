@@ -1,11 +1,11 @@
 const { Pool } = require('pg');
 
 const pool = new Pool({
-    user: 'kamil_user', // Taki sam jak POSTGRES_USER w docker run
-    host: 'localhost',
-    database: 'product_service_db', // Taki sam jak POSTGRES_DB w docker run
-    password: 'supersecretpassword', // Taki sam jak POSTGRES_PASSWORD w docker run
-    port: 5433,
+    user: process.env.DB_USER,
+    host: process.env.DB_HOST,
+    database: process.env.DB_NAME,
+    password: process.env.DB_PASSWORD,
+    port: parseInt(process.env.DB_PORT || "5432"), // Użyj portu z env, domyślnie 5432
 });
 
 pool.on('connect', () => {

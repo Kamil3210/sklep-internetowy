@@ -1,0 +1,15 @@
+node_modules
+dist 
+# 'dist' to typowy folder wynikowy dla 'npm run build' w projektach Vite/React.
+# Jeśli Twój projekt generuje inny folder (np. 'build'), dodaj go tutaj.
+# Nie chcemy kopiować lokalnie zbudowanych artefaktów, Docker zbuduje je sam.
+.env
+.env.*
+!/.env.example # Jeśli masz plik z przykładowymi zmiennymi
+
+Dockerfile
+.dockerignore
+nginx.conf # Ten plik jest kopiowany przez Dockerfile, więc nie musi być w kontekście runtime'u
+.git
+.gitignore
+*.md

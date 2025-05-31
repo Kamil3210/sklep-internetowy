@@ -1,80 +1,121 @@
+// order-service/index.js
 const express = require('express');
-const db = require('./db'); // Importujemy nasz moduł db.js
-const cors = require('cors'); // <<< 1. Importuj cors
+const db = require('./db'); // Zakładamy, że db.js jest w tym samym katalogu
+const axios = require('axios');
 const app = express();
+
+// Odczyt portu z zmiennej środowiskowej lub domyślny 3002
 const port = process.env.PORT || 3002;
 
-app.use(cors()); // <<< 2. Użyj cors
-app.use(express.json());
+// Odczyt bazowego URL product-service z zmiennej środowiskowej
+// lub domyślny dla lokalnego developmentu bez Dockera
+const PRODUCT_SERVICE_BASE_URL = process.env.PRODUCT_SERVICE_URL || 'http://localhost:3001';
 
-// Inicjalizacja bazy danych przy starcie aplikacji
+app.use(express.json()); // Middleware do parsowania ciała żądań JSON
+
+// Inicjalizacja bazy danych (tworzenie tabel, jeśli nie istnieją) przy starcie aplikacji
 db.initializeDatabase().catch(err => {
     console.error("Failed to initialize database (order_service_db) on startup:", err);
-    process.exit(1);
+    process.exit(1); // Zakończ aplikację, jeśli inicjalizacja bazy się nie powiedzie
 });
 
-// --- Endpointy dla Zamówień z użyciem PostgreSQL ---
+// Healthcheck endpoint
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'UP', message: 'Order service is healthy' });
+});
 
-// POST /orders - stwórz nowe zamówienie
+// POST /orders - tworzenie nowego zamówienia
 app.post('/orders', async (req, res) => {
-    const { userId, productItems } = req.body; // productItems: [{ productId: "prod123", quantity: 1, priceAtPurchase: 99.99 }, ...]
+    console.log('Attempting to create order. PRODUCT_SERVICE_BASE_URL currently set to:', PRODUCT_SERVICE_BASE_URL);
+    const { userId, productItems: requestedItems } = req.body;
 
-    if (!userId || !productItems || !Array.isArray(productItems) || productItems.length === 0) {
+    if (!userId || !requestedItems || !Array.isArray(requestedItems) || requestedItems.length === 0) {
         return res.status(400).send('Missing userId or productItems.');
     }
 
-    // Walidacja productItems
-    for (const item of productItems) {
-        if (!item.productId || item.quantity == null || item.priceAtPurchase == null || 
-            isNaN(parseInt(item.quantity)) || parseInt(item.quantity) <= 0 ||
-            isNaN(parseFloat(item.priceAtPurchase)) || parseFloat(item.priceAtPurchase) < 0) {
-            return res.status(400).send('Invalid productItems structure or values. Each item must have productId, quantity, and priceAtPurchase.');
+    for (const item of requestedItems) {
+        if (!item.productId || item.quantity == null || 
+            isNaN(parseInt(item.quantity)) || parseInt(item.quantity) <= 0) {
+            return res.status(400).send('Invalid productItems structure. Each item must have productId and a positive quantity.');
         }
     }
-
-    // Obliczenie całkowitej kwoty zamówienia
-    const totalAmount = productItems.reduce((sum, item) => sum + (parseFloat(item.priceAtPurchase) * parseInt(item.quantity)), 0);
 
     const client = await db.pool.connect(); // Pobieramy klienta z puli dla transakcji
     try {
         await client.query('BEGIN'); // Rozpoczęcie transakcji
 
-        // 1. Wstawienie do tabeli 'orders'
+        const processedProductItems = [];
+        let calculatedTotalAmount = 0;
+
+        for (const requestedItem of requestedItems) {
+            // Poprawna konstrukcja URL do endpointu produktu w product-service
+            const targetUrl = `${PRODUCT_SERVICE_BASE_URL}/products/${requestedItem.productId}`;
+            console.log(`Order Service: Calling Product Service for product ID ${requestedItem.productId} at URL: ${targetUrl}`);
+            
+            try {
+                const productResponse = await axios.get(targetUrl);
+                
+                if (productResponse.status === 200 && productResponse.data) {
+                    const productData = productResponse.data;
+                    processedProductItems.push({
+                        productId: productData.id, // Używamy ID z odpowiedzi dla spójności
+                        quantity: parseInt(requestedItem.quantity),
+                        priceAtPurchase: parseFloat(productData.price) // Używamy ceny z product-service
+                    });
+                    calculatedTotalAmount += parseFloat(productData.price) * parseInt(requestedItem.quantity);
+                } else {
+                    // Ten blok może nie być osiągnięty, bo axios rzuca błędy dla statusów poza 2xx
+                    throw new Error(`Invalid response from product-service for product ID ${requestedItem.productId}. Status: ${productResponse.status}`);
+                }
+            } catch (error) {
+                console.error(`Error fetching product ID ${requestedItem.productId} from ${targetUrl}:`, error.response ? JSON.stringify(error.response.data) : error.message);
+                if (error.response && error.response.status === 404) {
+                    await client.query('ROLLBACK'); // Wycofaj transakcję
+                    return res.status(400).json({ message: `Product with ID ${requestedItem.productId} not found via product-service.` });
+                }
+                throw error; // Rzuć błąd dalej, aby transakcja została wycofana w głównym bloku catch
+            }
+        }
+
+        // Zapis zamówienia do tabeli 'orders'
         const orderQuery = `
             INSERT INTO orders (user_id, total_amount, status) 
-            VALUES ($1, $2, $3) RETURNING id, created_at, status, total_amount, user_id;
+            VALUES ($1, $2, $3) RETURNING id, user_id, total_amount, status, created_at, updated_at;
         `;
-        const orderResult = await client.query(orderQuery, [userId, totalAmount.toFixed(2), 'Pending']);
+        const orderResult = await client.query(orderQuery, [userId, calculatedTotalAmount.toFixed(2), 'Pending']);
         const newOrder = orderResult.rows[0];
 
-        // 2. Wstawienie do tabeli 'order_items' dla każdej pozycji
-        for (const item of productItems) {
+        // Zapis pozycji zamówienia do tabeli 'order_items'
+        for (const item of processedProductItems) {
             const orderItemQuery = `
                 INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase)
                 VALUES ($1, $2, $3, $4);
             `;
-            await client.query(orderItemQuery, [newOrder.id, item.productId, parseInt(item.quantity), parseFloat(item.priceAtPurchase).toFixed(2)]);
+            await client.query(orderItemQuery, [newOrder.id, String(item.productId), item.quantity, item.priceAtPurchase.toFixed(2)]);
         }
 
         await client.query('COMMIT'); // Zatwierdzenie transakcji
 
-        // Pobranie pełnych danych zamówienia do odpowiedzi (opcjonalne, ale dobre dla klienta)
+        // Przygotowanie odpowiedzi z pełnymi danymi zamówienia
         const fullOrder = {
             ...newOrder,
-            products: productItems.map(pi => ({ // Używamy productItems z requestu, bo mamy tam wszystkie dane
-                productId: pi.productId,
-                quantity: parseInt(pi.quantity),
-                priceAtPurchase: parseFloat(pi.priceAtPurchase).toFixed(2)
-            }))
+            products: processedProductItems 
         };
         res.status(201).json(fullOrder);
 
     } catch (err) {
-        await client.query('ROLLBACK'); // Wycofanie transakcji w przypadku błędu
-        console.error('Error creating order:', err.message, err.stack);
-        res.status(500).send('Server error while creating order.');
+        // Upewniamy się, że rollback jest wywoływany tylko jeśli transakcja była aktywna i odpowiedź nie została jeszcze wysłana
+        if (client && !res.headersSent) { 
+             try { await client.query('ROLLBACK'); } catch (rbError) { console.error('Error rolling back transaction in outer catch', rbError); }
+        }
+        console.error('Error creating order (outer catch):', err.message, err.stack);
+        if (!res.headersSent) { // Wysyłamy błąd 500 tylko jeśli wcześniej nie wysłano innej odpowiedzi (np. 400)
+             res.status(500).send('Server error while creating order.');
+        }
     } finally {
-        client.release(); // Zwolnienie klienta z powrotem do puli
+        if (client) {
+            client.release(); // Zawsze zwalniamy klienta z powrotem do puli
+        }
     }
 });
 
@@ -82,7 +123,6 @@ app.post('/orders', async (req, res) => {
 app.get('/orders/user/:userId', async (req, res) => {
     const { userId } = req.params;
     try {
-        // Pobieranie zamówień
         const ordersQuery = `
             SELECT id, user_id, total_amount, status, created_at, updated_at 
             FROM orders WHERE user_id = $1 ORDER BY created_at DESC;
@@ -150,10 +190,10 @@ app.put('/orders/:orderId/status', async (req, res) => {
     if (!status) {
         return res.status(400).send('Missing status.');
     }
-    // Można dodać walidację dozwolonych statusów
-    // const allowedStatuses = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
+    // Można dodać walidację dozwolonych statusów:
+    // const allowedStatuses = ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Completed'];
     // if (!allowedStatuses.includes(status)) {
-    // return res.status(400).send('Invalid status value.');
+    //    return res.status(400).send('Invalid status value.');
     // }
 
     try {
@@ -163,8 +203,8 @@ app.put('/orders/:orderId/status', async (req, res) => {
         const { rows } = await db.query(updateQuery, [status, orderId]);
 
         if (rows.length > 0) {
-            // Jeśli chcemy zwrócić zamówienie z pozycjami:
             const updatedOrder = rows[0];
+            // Opcjonalnie: dołącz pozycje do odpowiedzi, tak jak w GET /orders/:orderId
             const itemsQuery = `SELECT product_id, quantity, price_at_purchase FROM order_items WHERE order_id = $1;`;
             const itemsResult = await db.query(itemsQuery, [updatedOrder.id]);
             res.json({ ...updatedOrder, products: itemsResult.rows });
@@ -178,14 +218,14 @@ app.put('/orders/:orderId/status', async (req, res) => {
 });
 
 app.listen(port, () => {
-    console.log(`Order service (DB connected) listening on port ${port}`);
+    console.log(`Order service (DB connected, inter-service comms) listening on port ${port}`);
 });
 
-// Obsługa poprawnego zamykania puli połączeń
+// Obsługa poprawnego zamykania puli połączeń przy zamykaniu aplikacji
 const gracefulShutdown = async () => {
     console.log('Shutting down order_service gracefully...');
     try {
-        await db.pool.end();
+        await db.pool.end(); // Zamyka wszystkie połączenia w puli
         console.log('PostgreSQL pool (order_service_db) has been closed.');
         process.exit(0);
     } catch (error) {
@@ -193,5 +233,6 @@ const gracefulShutdown = async () => {
         process.exit(1);
     }
 };
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
+
+process.on('SIGTERM', gracefulShutdown); // sygnał z `kill`
+process.on('SIGINT', gracefulShutdown);  // sygnał z Ctrl+C

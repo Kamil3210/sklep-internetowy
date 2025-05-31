@@ -1,0 +1,133 @@
+# sklep-internetowy/docker-compose.yml
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: sklep_db # Nazwa kontenera
+    environment:
+      POSTGRES_USER: kamil_user # Możesz zmienić
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_VALUE} # <<< ZMIANA TUTAJ
+      POSTGRES_DB: product_service_db # Baza danych dla product-service (order_service_db zostanie stworzona przez init skrypt w order-service)
+    ports:
+      - "5433:5432" # Mapowanie portu hosta 5433 na port kontenera 5432 (tak jak robiliśmy wcześniej)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Użycie zdefiniowanego wolumenu
+    networks:
+      - sklep-network # Przypisanie do naszej sieci
+    restart: unless-stopped # Polityka restartu
+    healthcheck: # Sprawdzanie "zdrowia" kontenera (bonus)
+      test: ["CMD-SHELL", "pg_isready -U kamil_user -d product_service_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  product-service:
+      build:
+        context: ./product-service # Ścieżka do katalogu z Dockerfile dla product-service
+        dockerfile: Dockerfile # Nazwa pliku Dockerfile (domyślna, więc można pominąć)
+      container_name: sklep_product_service
+      environment:
+        PORT: 3001 # Port, na którym działa aplikacja w kontenerze
+        DB_HOST: db # Nazwa usługi bazy danych (Docker Compose zapewni resolucję DNS)
+        DB_USER: kamil_user
+        DB_PASSWORD: ${POSTGRES_PASSWORD_VALUE} # <<< ZMIANA TUTAJ        
+        DB_NAME: product_service_db
+        DB_PORT: 5432 # Port PostgreSQL wewnątrz sieci Docker
+      ports:
+        - "3001:3001" # Mapowanie portu hosta 3001 na port kontenera 3001
+      volumes:
+        # Dla dewelopmentu z live reload (bonus +2 pkt):
+        - ./product-service:/usr/src/app 
+        - /usr/src/app/node_modules # Zapobiega nadpisaniu node_modules z kontenera przez pusty z hosta
+      depends_on:
+        db: # Zależność od usługi bazy danych
+          condition: service_healthy # Poczekaj, aż baza danych będzie "zdrowa" (healthcheck)
+      networks:
+        - sklep-network
+      restart: unless-stopped
+      healthcheck: # <<< DODAJ TĘ SEKCJĘ
+        test: ["CMD-SHELL", "curl -f http://localhost:3001/health || exit 1"]
+        interval: 30s       # Sprawdzaj co 30 sekund
+        timeout: 10s        # Czekaj maksymalnie 10 sekund na odpowiedź
+        retries: 3          # Spróbuj 3 razy zanim oznaczysz jako "unhealthy"
+        start_period: 40s
+
+  order-service: # Dodajemy nową usługę
+    build:
+      context: ./order-service # Ścieżka do Dockerfile dla order-service
+    container_name: sklep_order_service
+    environment:
+      PORT: 3002 # Port, na którym działa aplikacja w kontenerze
+      DB_HOST: db # Nazwa usługi bazy danych (ta sama instancja PostgreSQL)
+      DB_USER: kamil_user
+      DB_PASSWORD: ${POSTGRES_PASSWORD_VALUE} # <<< ZMIANA TUTAJ
+      DB_NAME: order_service_db # Nazwa bazy danych dla order-service
+      DB_PORT: 5432 # Port PostgreSQL wewnątrz sieci Docker
+      PRODUCT_SERVICE_URL: http://sklep_product_service:3001 # URL do product-service w sieci Docker
+    ports:
+      - "3002:3002" # Mapowanie portu hosta 3002 na port kontenera 3002
+    volumes:
+      # Dla dewelopmentu z live reload (bonus):
+      - ./order-service:/usr/src/app
+      - /usr/src/app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+    networks:
+      - sklep-network
+    restart: unless-stopped
+    healthcheck: # <<< DODAJ TĘ SEKCJĘ
+      test: ["CMD-SHELL", "curl -f http://localhost:3002/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+
+  frontend:
+    build:
+      context: ./frontend # Ścieżka do Dockerfile dla frontend
+    container_name: sklep_frontend
+    ports:
+      - "3000:80" # Mapowanie portu 3000 hosta na port 80 kontenera Nginx
+    networks:
+      - sklep-network
+    depends_on: 
+      product-service:
+        condition: service_healthy # Zakładając, że product-service ma już healthcheck
+      order-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: sklep_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "kamil@example.com" # Ustaw swój email
+      PGADMIN_DEFAULT_PASSWORD: "TwojeSuperHasloPgAdmin" # Ustaw swoje silne hasło
+    ports:
+      - "8080:80" # Mapowanie portu 8080 hosta na port 80 kontenera pgAdmin
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin # Użycie zdefiniowanego wolumenu dla danych pgAdmin
+    networks:
+      - sklep-network
+    depends_on:
+      db: # pgAdmin zależy od bazy danych
+        condition: service_healthy
+    restart: unless-stopped
+
+    
+
+networks:
+  sklep-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  pgadmin_data: # <<< Nowy wolumen dla pgAdmin
+    driver: local

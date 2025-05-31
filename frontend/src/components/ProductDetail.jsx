@@ -1,14 +1,19 @@
 // frontend/src/components/ProductDetail.jsx
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import { useCart } from '../context/CartContext'; // <<< Importuj useCart
 
 function ProductDetail() {
     const [product, setProduct] = useState(null);
+    // ... (loading, error, productId - bez zmian)
+    const { addToCart } = useCart(); // <<< Użyj hooka useCart
+    const { productId } = useParams();
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const { productId } = useParams(); // Pobiera parametr :productId z URL
+
 
     useEffect(() => {
+        // ... (fetchProduct - bez zmian)
         const fetchProduct = async () => {
             setLoading(true);
             setError(null);
@@ -26,23 +31,20 @@ function ProductDetail() {
                 setLoading(false);
             }
         };
+        if (productId) fetchProduct();
+    }, [productId]);
 
-        if (productId) {
-            fetchProduct();
+    const handleAddToCart = () => {
+        if (product) {
+            addToCart(product); // Dodajemy cały obiekt produktu
+            alert(`${product.name} został dodany do koszyka!`);
         }
-    }, [productId]); // Efekt uruchomi się ponownie, gdy productId się zmieni
+    };
 
-    if (loading) {
-        return <p>Ładowanie szczegółów produktu...</p>;
-    }
-
-    if (error) {
-        return <p>Błąd podczas ładowania produktu: {error}. Upewnij się, że produkt o ID: {productId} istnieje.</p>;
-    }
-
-    if (!product) {
-        return <p>Nie znaleziono produktu.</p>;
-    }
+    // ... (obsługa loading, error, !product - bez zmian)
+    if (loading) return <p>Ładowanie szczegółów produktu...</p>;
+    if (error) return <p>Błąd: {error}</p>;
+    if (!product) return <p>Nie znaleziono produktu.</p>;
 
     return (
         <div>
@@ -50,9 +52,7 @@ function ProductDetail() {
             <h2>{product.name}</h2>
             <p><strong>Cena:</strong> {product.price} PLN</p>
             <p><strong>Kategoria:</strong> {product.category}</p>
-            <p><strong>ID Produktu:</strong> {product.id}</p>
-            {/* Tutaj można dodać więcej szczegółów, np. opis, zdjęcia, przycisk "Dodaj do koszyka" */}
-            <button onClick={() => alert(`Dodano ${product.name} do koszyka (jeszcze nie działa!)`)}>
+            <button onClick={handleAddToCart}> {/* <<< Zaktualizowany przycisk */}
                 Dodaj do koszyka
             </button>
         </div>

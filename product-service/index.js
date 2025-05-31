@@ -146,6 +146,11 @@ app.delete('/products/:id', async (req, res) => {
     }
 });
 
+
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'UP', message: 'Product service is healthy' });
+});
+
 app.listen(port, () => {
     console.log(`Product service listening on port ${port}`);
 });
