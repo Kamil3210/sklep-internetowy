@@ -1,15 +1,21 @@
 # sklep-internetowy/order-service/Dockerfile
-# Etap 1: Wybór obrazu bazowego Node.js
 FROM node:18-alpine AS base
 
 WORKDIR /usr/src/app
 
-# Instalacja curl, potrzebnego do healthchecków
-RUN apk add --no-cache curl
+# Instalacja curl (dla healthchecków) i nodemon globalnie
+RUN apk add --no-cache curl && npm install -g nodemon
 
 COPY package*.json ./
-RUN npm ci --only=production
+
+# Instalujemy zależności (w tym devDependencies, jeśli nodemon jest tam zdefiniowany)
+RUN npm ci
+# lub RUN npm install
+
 COPY . .
+
 ENV PORT=3002
 EXPOSE ${PORT}
-CMD [ "node", "index.js" ]
+
+# Uruchamiamy aplikację przez globalny nodemon
+CMD [ "nodemon", "index.js" ]

@@ -1,3 +1,4 @@
+// sklep-internetowy/product-service/db.js
 const { Pool } = require('pg');
 
 const pool = new Pool({
@@ -5,29 +6,26 @@ const pool = new Pool({
     host: process.env.DB_HOST,
     database: process.env.DB_NAME,
     password: process.env.DB_PASSWORD,
-    port: parseInt(process.env.DB_PORT || "5432"), // Użyj portu z env, domyślnie 5432
+    port: parseInt(process.env.DB_PORT || "5432"),
 });
 
 pool.on('connect', () => {
-    console.log('Connected to the PostgreSQL database!');
+    console.log(`Product service connected to PostgreSQL database: ${process.env.DB_NAME} on ${process.env.DB_HOST}`);
 });
 
 pool.on('error', (err) => {
-    console.error('Unexpected error on idle client', err);
+    console.error('Unexpected error on idle client (product_service_db)', err);
     process.exit(-1);
 });
 
-// Funkcja do wykonywania zapytań
-// Przykład użycia: const { rows } = await query('SELECT * FROM users');
 const query = async (text, params) => {
     const start = Date.now();
     const res = await pool.query(text, params);
     const duration = Date.now() - start;
-    console.log('executed query', { text, duration, rows: res.rowCount });
+    console.log('Product service executed query', { text: text.substring(0, 100), duration, rows: res.rowCount });
     return res;
 };
 
-// Funkcja do inicjalizacji tabeli (jeśli jeszcze nie istnieje)
 const initializeDatabase = async () => {
     const createTableQuery = `
         CREATE TABLE IF NOT EXISTS products (
@@ -39,7 +37,6 @@ const initializeDatabase = async () => {
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
     `;
-    // Prosty trigger do aktualizacji updated_at
     const createTriggerFunctionQuery = `
         CREATE OR REPLACE FUNCTION trigger_set_timestamp()
         RETURNS TRIGGER AS $$
@@ -61,22 +58,19 @@ const initializeDatabase = async () => {
 
     try {
         await pool.query(createTableQuery);
-        console.log('Table "products" ensured to exist.');
+        console.log('Product service: Table "products" ensured to exist.');
         await pool.query(createTriggerFunctionQuery);
-        console.log('Trigger function "trigger_set_timestamp" ensured to exist.');
-        await pool.query(dropExistingTriggerQuery); // Usuwamy stary trigger jeśli istnieje, aby uniknąć błędu
+        console.log('Product service: Trigger function "trigger_set_timestamp" ensured to exist.');
+        await pool.query(dropExistingTriggerQuery);
         await pool.query(createTriggerQuery);
-        console.log('Trigger "set_timestamp_products" ensured for "products" table updates.');
+        console.log('Product service: Trigger "set_timestamp_products" ensured for "products" table updates.');
     } catch (err) {
-        console.error('Error initializing database schema:', err.stack);
-        // Jeśli błąd jest krytyczny dla uruchomienia aplikacji, można tu rzucić wyjątek dalej
-        // lub process.exit(1)
+        console.error('Product service: Error initializing database schema:', err.stack);
     }
 };
-
 
 module.exports = {
     query,
     initializeDatabase,
-    pool // eksportujemy pool na wypadek gdybyśmy potrzebowali bezpośredniego dostępu np. do transakcji
+    pool
 };

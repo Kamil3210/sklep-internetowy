@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Keycloak Silent Check SSO</title>
+</head>
+<body>
+    <script>
+        // Ten plik jest używany przez keycloak-js do cichego sprawdzania statusu SSO w iframe.
+        // Zazwyczaj nie wymaga dodatkowego kodu, o ile Keycloak jest poprawnie skonfigurowany.
+        // Upewnij się, że `silentCheckSsoRedirectUri` w `keycloak.init` wskazuje na ten plik.
+        // np. `window.location.origin + '/silent-check-sso.html'`
+    </script>
+</body>
+</html>

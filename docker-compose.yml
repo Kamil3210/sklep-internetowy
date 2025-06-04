@@ -1,74 +1,115 @@
 # sklep-internetowy/docker-compose.yml
-
 services:
   db:
     image: postgres:15-alpine
-    container_name: sklep_db # Nazwa kontenera
+    container_name: sklep_db
     environment:
-      POSTGRES_USER: kamil_user # Możesz zmienić
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_VALUE} # <<< ZMIANA TUTAJ
-      POSTGRES_DB: product_service_db # Baza danych dla product-service (order_service_db zostanie stworzona przez init skrypt w order-service)
+      POSTGRES_USER: kamil_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_VALUE}
+      POSTGRES_DB: product_service_db # Pierwsza baza danych, order_service_db i keycloak_db tworzone ręcznie/skryptem
     ports:
-      - "5433:5432" # Mapowanie portu hosta 5433 na port kontenera 5432 (tak jak robiliśmy wcześniej)
+      - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data # Użycie zdefiniowanego wolumenu
+      - postgres_data:/var/lib/postgresql/data
     networks:
-      - sklep-network # Przypisanie do naszej sieci
-    restart: unless-stopped # Polityka restartu
-    healthcheck: # Sprawdzanie "zdrowia" kontenera (bonus)
+      - sklep-network
+    restart: unless-stopped
+    healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kamil_user -d product_service_db"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
 
-  product-service:
-      build:
-        context: ./product-service # Ścieżka do katalogu z Dockerfile dla product-service
-        dockerfile: Dockerfile # Nazwa pliku Dockerfile (domyślna, więc można pominąć)
-      container_name: sklep_product_service
-      environment:
-        PORT: 3001 # Port, na którym działa aplikacja w kontenerze
-        DB_HOST: db # Nazwa usługi bazy danych (Docker Compose zapewni resolucję DNS)
-        DB_USER: kamil_user
-        DB_PASSWORD: ${POSTGRES_PASSWORD_VALUE} # <<< ZMIANA TUTAJ        
-        DB_NAME: product_service_db
-        DB_PORT: 5432 # Port PostgreSQL wewnątrz sieci Docker
-      ports:
-        - "3001:3001" # Mapowanie portu hosta 3001 na port kontenera 3001
-      volumes:
-        # Dla dewelopmentu z live reload (bonus +2 pkt):
-        - ./product-service:/usr/src/app 
-        - /usr/src/app/node_modules # Zapobiega nadpisaniu node_modules z kontenera przez pusty z hosta
-      depends_on:
-        db: # Zależność od usługi bazy danych
-          condition: service_healthy # Poczekaj, aż baza danych będzie "zdrowa" (healthcheck)
-      networks:
-        - sklep-network
-      restart: unless-stopped
-      healthcheck: # <<< DODAJ TĘ SEKCJĘ
-        test: ["CMD-SHELL", "curl -f http://localhost:3001/health || exit 1"]
-        interval: 30s       # Sprawdzaj co 30 sekund
-        timeout: 10s        # Czekaj maksymalnie 10 sekund na odpowiedź
-        retries: 3          # Spróbuj 3 razy zanim oznaczysz jako "unhealthy"
-        start_period: 40s
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.4 # Używamy oficjalnego obrazu
+    container_name: sklep_keycloak
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: db
+      KC_DB_URL_DATABASE: keycloak_db # Baza danych dla Keycloaka
+      KC_DB_USERNAME: kamil_user
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD_VALUE}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true" # Włącza endpointy /health w Keycloaku
+    ports:
+      - "8180:8080"
+    command: start-dev
+    networks:
+      - sklep-network
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # healthcheck: # Healthcheck dla Keycloaka jest na razie zakomentowany
+    #   test: ["CMD-SHELL", "curl -f http://localhost:8080/q/health/ready || exit 1"]
+    #   interval: 20s
+    #   timeout: 10s
+    #   retries: 6
+    #   start_period: 150s
 
-  order-service: # Dodajemy nową usługę
+  product-service:
     build:
-      context: ./order-service # Ścieżka do Dockerfile dla order-service
+      context: ./product-service
+      dockerfile: Dockerfile
+    container_name: sklep_product_service
+    environment:
+      PORT: 3001
+      DB_HOST: db
+      DB_USER: kamil_user
+      DB_PASSWORD: ${POSTGRES_PASSWORD_VALUE}
+      DB_NAME: product_service_db
+      DB_PORT: 5432
+      KEYCLOAK_AUTH_SERVER_URL: http://keycloak:8080/
+      KEYCLOAK_REALM: sklep-realm
+      KEYCLOAK_CLIENT_ID: ${PRODUCT_SERVICE_KEYCLOAK_CLIENT_ID}
+      SESSION_SECRET: ${PRODUCT_SERVICE_SESSION_SECRET}
+      DEBUG: "keycloak*,keycloak-connect:*,KC_RSA_RESOLVER,keycloak-connect:grant-manager,keycloak-connect:keycloak"  # <<< ZAKTUALIZUJ TĘ LINIĘ
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./product-service:/usr/src/app
+      - /usr/src/app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+      keycloak:
+        condition: service_started # Zmienione z service_healthy
+    networks:
+      - sklep-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  order-service:
+    build:
+      context: ./order-service
+      dockerfile: Dockerfile
     container_name: sklep_order_service
     environment:
-      PORT: 3002 # Port, na którym działa aplikacja w kontenerze
-      DB_HOST: db # Nazwa usługi bazy danych (ta sama instancja PostgreSQL)
+      PORT: 3002
+      DB_HOST: db
       DB_USER: kamil_user
-      DB_PASSWORD: ${POSTGRES_PASSWORD_VALUE} # <<< ZMIANA TUTAJ
-      DB_NAME: order_service_db # Nazwa bazy danych dla order-service
-      DB_PORT: 5432 # Port PostgreSQL wewnątrz sieci Docker
-      PRODUCT_SERVICE_URL: http://sklep_product_service:3001 # URL do product-service w sieci Docker
+      DB_PASSWORD: ${POSTGRES_PASSWORD_VALUE}
+      DB_NAME: order_service_db
+      DB_PORT: 5432
+      PRODUCT_SERVICE_URL: http://product-service:3001 # Komunikacja po nazwie usługi product-service
+      KEYCLOAK_AUTH_SERVER_URL: http://keycloak:8080/
+      KEYCLOAK_REALM: sklep-realm
+      KEYCLOAK_CLIENT_ID: ${ORDER_SERVICE_KEYCLOAK_CLIENT_ID}
+      SESSION_SECRET: ${ORDER_SERVICE_SESSION_SECRET}
+      DEBUG: "keycloak*" # Można też dodać tutaj, jeśli będziemy debugować order-service
     ports:
-      - "3002:3002" # Mapowanie portu hosta 3002 na port kontenera 3002
+      - "3002:3002"
     volumes:
-      # Dla dewelopmentu z live reload (bonus):
       - ./order-service:/usr/src/app
       - /usr/src/app/node_modules
     depends_on:
@@ -76,51 +117,50 @@ services:
         condition: service_healthy
       product-service:
         condition: service_healthy
+      keycloak:
+        condition: service_started # Zmienione z service_healthy
     networks:
       - sklep-network
     restart: unless-stopped
-    healthcheck: # <<< DODAJ TĘ SEKCJĘ
+    healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:3002/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 45s
-
+      start_period: 70s
 
   frontend:
     build:
-      context: ./frontend # Ścieżka do Dockerfile dla frontend
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: sklep_frontend
     ports:
-      - "3000:80" # Mapowanie portu 3000 hosta na port 80 kontenera Nginx
+      - "3000:80"
     networks:
       - sklep-network
-    depends_on: 
+    depends_on:
       product-service:
-        condition: service_healthy # Zakładając, że product-service ma już healthcheck
+        condition: service_healthy
       order-service:
         condition: service_healthy
     restart: unless-stopped
 
-  
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: sklep_pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: "kamil@example.com" # Ustaw swój email
-      PGADMIN_DEFAULT_PASSWORD: "TwojeSuperHasloPgAdmin" # Ustaw swoje silne hasło
+      PGADMIN_DEFAULT_EMAIL: "kamil@example.com"
+      PGADMIN_DEFAULT_PASSWORD: "TwojeSuperHasloPgAdmin" # Pamiętaj, aby to zmienić
     ports:
-      - "8080:80" # Mapowanie portu 8080 hosta na port 80 kontenera pgAdmin
+      - "8080:80"
     volumes:
-      - pgadmin_data:/var/lib/pgadmin # Użycie zdefiniowanego wolumenu dla danych pgAdmin
+      - pgadmin_data:/var/lib/pgadmin
     networks:
       - sklep-network
     depends_on:
-      db: # pgAdmin zależy od bazy danych
+      db:
         condition: service_healthy
     restart: unless-stopped
-
-    
 
 networks:
   sklep-network:
@@ -129,5 +169,5 @@ networks:
 volumes:
   postgres_data:
     driver: local
-  pgadmin_data: # <<< Nowy wolumen dla pgAdmin
+  pgadmin_data:
     driver: local

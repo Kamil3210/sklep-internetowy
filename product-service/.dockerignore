@@ -4,4 +4,4 @@ Dockerfile
 .dockerignore
 .git
 .gitignore
-*.md # Jeśli nie chcesz plików Markdown w obrazie
+*.md

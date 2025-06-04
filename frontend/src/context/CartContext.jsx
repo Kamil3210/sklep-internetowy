@@ -9,12 +9,10 @@ export const useCart = () => {
 
 export const CartProvider = ({ children }) => {
     const [cartItems, setCartItems] = useState(() => {
-        // Spróbuj załadować koszyk z localStorage przy inicjalizacji
         const localData = localStorage.getItem('cartItems');
         return localData ? JSON.parse(localData) : [];
     });
 
-    // Zapisuj koszyk do localStorage za każdym razem, gdy się zmieni
     useEffect(() => {
         localStorage.setItem('cartItems', JSON.stringify(cartItems));
     }, [cartItems]);
@@ -23,13 +21,13 @@ export const CartProvider = ({ children }) => {
         setCartItems(prevItems => {
             const existingItem = prevItems.find(item => item.id === product.id);
             if (existingItem) {
-                // Jeśli produkt już jest w koszyku, zwiększ ilość
                 return prevItems.map(item =>
                     item.id === product.id ? { ...item, quantity: item.quantity + quantity } : item
                 );
             } else {
-                // Jeśli produktu nie ma w koszyku, dodaj go
-                return [...prevItems, { ...product, quantity }];
+                // Upewnij się, że cena jest liczbą
+                const priceAsNumber = parseFloat(product.price);
+                return [...prevItems, { ...product, price: priceAsNumber, quantity }];
             }
         });
     };
@@ -39,24 +37,31 @@ export const CartProvider = ({ children }) => {
     };
 
     const updateQuantity = (productId, quantity) => {
-        if (quantity <= 0) {
-            removeFromCart(productId); // Jeśli ilość <= 0, usuń produkt
+        const numQuantity = parseInt(quantity);
+        if (numQuantity <= 0) {
+            removeFromCart(productId);
         } else {
             setCartItems(prevItems =>
                 prevItems.map(item =>
-                    item.id === productId ? { ...item, quantity } : item
+                    item.id === productId ? { ...item, quantity: numQuantity } : item
                 )
             );
         }
     };
-
+    
     const clearCart = () => {
         setCartItems([]);
-    }
+    };
 
     const getCartTotal = () => {
-        return cartItems.reduce((total, item) => total + (parseFloat(item.price) * item.quantity), 0);
+        return cartItems.reduce((total, item) => {
+            // Upewnij się, że item.price jest traktowane jako liczba
+            const price = parseFloat(item.price);
+            return total + (price * item.quantity);
+        }, 0);
     };
+
+    const itemCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
 
     const value = {
         cartItems,
@@ -65,7 +70,7 @@ export const CartProvider = ({ children }) => {
         updateQuantity,
         clearCart,
         getCartTotal,
-        itemCount: cartItems.reduce((sum, item) => sum + item.quantity, 0)
+        itemCount
     };
 
     return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
